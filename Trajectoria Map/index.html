@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Military Icons Map</title>
+  <style>
+    body, html { margin:0; padding:0; height:100%; font-family: Arial, sans-serif; }
+    #map { width:100%; height:300px; transition: height 0.35s ease; cursor: pointer; }
+    #map.expanded { height:100vh; }
+    #controls {
+      position: fixed;
+      right: 16px;
+      top: 72px;
+      background: rgba(255,255,255,0.95);
+      padding: 12px;
+      border-radius: 10px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+      width: 200px;
+      z-index: 2000;
+    }
+    #controls h4 { margin: 0 0 8px 0; font-size: 16px; }
+    .itemButton {
+      display:block;
+      width:100%;
+      padding:8px 10px;
+      margin:6px 0;
+      border-radius:6px;
+      border: 1px solid #ddd;
+      background:#fafafa;
+      text-align:left;
+      cursor:pointer;
+      font-size:14px;
+    }
+    .itemButton.active { background:#007bff; color:#fff; border-color:#006ae6; }
+    #toggleBtn { margin:10px; padding:8px 14px; }
+    #resultsWrap { padding: 10px; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; font-size:13px; }
+    th { background:#0b5ed7; color:#fff; padding:8px; text-align:left; }
+    td { padding:8px; border-bottom:1px solid #eee; vertical-align:top; }
+    /* small responsive */
+    @media (max-width:600px){
+      #controls{ right:8px; top:60px; width:160px; }
+    }
+  </style>
+
+  <!-- Yandex Maps API -->
+  <script src="https://api-maps.yandex.com/2.1/?lang=en_US" type="text/javascript"></script>
+</head>
+<body>
+
+  <div id="map"></div>
+
+  <div style="padding:8px 12px;">
+    <button id="toggleBtn">Մեծացնել քարտեզը</button>
+    <span style="color:#666; margin-left:10px;">Ընտրեք օբյեկտ և սեղմեք քարտեզում՝ տեղադրելու համար։ Սեղմեք placemark-ի վրա՝ ջնջելու համար։</span>
+  </div>
+
+  <!-- Right control panel -->
+  <div id="controls">
+    <h4>Ընտրել օբյեկտ</h4>
+    <button class="itemButton active" data-type="tank">🟫 Տանկ</button>
+    <button class="itemButton" data-type="plane">🔵 Ինքնաթիռ</button>
+    <button class="itemButton" data-type="building">🏢 Շենք</button>
+    <button class="itemButton" data-type="infantry">🟩 Պեխոտ</button>
+    <button class="itemButton" data-type="artillery">🔴 Հրետանի</button>
+  </div>
+
+  <!-- Results -->
+  <div id="resultsWrap">
+    <table id="resultsTable">
+      <tr>
+        <th>Red Object</th>
+        <th>Blue Object</th>
+        <th>Distance (m)</th>
+        <th>Angle</th>
+        <th>Compass</th>
+      </tr>
+    </table>
+  </div>
+
+<script>
+ymaps.ready(init);
+
+let map;
+let objects = []; // array of placemarks
+let selectedType = "tank";
+let lines = [];
+
+/* NOTE: icons should be placed in ./img/ folder next to this html.
+   Filenames:
+   - img/tank.png
+   - img/plane.png
+   - img/building.png
+   - img/infantry.png
+   - img/artillery.png
+
+   (You can download the pack and put them in that folder.)
+*/
+
+const ICONS = {
+  tank: { href: "img/tank.png", size: [48,48], offset: [-24,-24] },
+  plane: { href: "img/plane.png", size: [48,48], offset: [-24,-24] },
+  building: { href: "img/building.png", size: [46,46], offset: [-23,-23] },
+  infantry: { href: "img/infantry.png", size: [40,40], offset: [-20,-20] },
+  artillery: { href: "img/artillery.png", size: [48,48], offset: [-24,-24] }
+};
+
+function init(){
+  map = new ymaps.Map('map', {
+    center: [40.0691,45.0382],
+    zoom: 7,
+    type: 'yandex#hybrid'
+  });
+
+  // Buttons
+  document.querySelectorAll('.itemButton').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      document.querySelectorAll('.itemButton').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedType = btn.dataset.type;
+    });
+  });
+
+  // Toggle map size
+  document.getElementById('toggleBtn').addEventListener('click', toggleMap);
+
+  // Place object on map click
+  map.events.add('click', function(e){
+    const coords = e.get('coords');
+    addObject(coords, selectedType);
+    recalc();
+  });
+}
+
+/* Create placemark with image icon */
+function addObject(coords, type){
+  const icon = ICONS[type] || ICONS.tank;
+
+  const placemark = new ymaps.Placemark(coords, { type: type }, {
+    iconLayout: 'default#image',
+    iconImageHref: icon.href,
+    iconImageSize: icon.size,
+    iconImageOffset: icon.offset,
+    draggable: true
+  });
+
+  // remove on click
+  placemark.events.add('click', function(){
+    map.geoObjects.remove(placemark);
+    objects = objects.filter(o=>o!==placemark);
+    recalc();
+  });
+
+  // when dragged, recalc
+  placemark.events.add('dragend', function(){ recalc(); });
+
+  map.geoObjects.add(placemark);
+  objects.push(placemark);
+  return placemark;
+}
+
+/* Recalculate pairings & redraw lines + results table */
+function recalc(){
+  // remove old lines
+  lines.forEach(l=>map.geoObjects.remove(l));
+  lines = [];
+
+  // clear results table rows (leave header)
+  document.querySelectorAll('#resultsTable tr:not(:first-child)').forEach(r=>r.remove());
+
+  // We'll treat "plane" items as blue, the rest as red (same logic as earlier)
+  const blues = objects.filter(o => o.properties.get('type') === 'plane');
+  const reds  = objects.filter(o => o.properties.get('type') !== 'plane');
+
+  let usedBlues = new Set();
+  let usedReds  = new Set();
+
+  blues.forEach(blue => {
+    let minDist = Infinity;
+    let chosenRed = null;
+    const bcoords = blue.geometry.getCoordinates();
+
+    reds.forEach(red => {
+      if (usedReds.has(red)) return;
+      const rcoords = red.geometry.getCoordinates();
+      const d = haversineDistance(bcoords, rcoords);
+      if (d < minDist){ minDist = d; chosenRed = red; }
+    });
+
+    if (chosenRed){
+      // draw line
+      const line = new ymaps.Polyline([ chosenRed.geometry.getCoordinates(), bcoords ], {}, {
+        strokeColor: "#FF3333",
+        strokeWidth: 3,
+        strokeOpacity: 0.9
+      });
+      map.geoObjects.add(line);
+      lines.push(line);
+
+      // compute angles
+      const angleVal = computeAngle(chosenRed.geometry.getCoordinates(), bcoords);
+      const compassVal = computeCompass(chosenRed.geometry.getCoordinates(), bcoords);
+
+      // add row
+      addTableRow(chosenRed, blue, minDist.toFixed(2), angleVal.toFixed(2), compassVal.toFixed(2));
+
+      usedReds.add(chosenRed);
+      usedBlues.add(blue);
+    }
+  });
+}
+
+/* Add row to results table */
+function addTableRow(red, blue, dist, angle, compass){
+  const table = document.getElementById('resultsTable');
+  const row = table.insertRow();
+  row.insertCell(0).innerText = `${red.properties.get('type')} — ${red.geometry.getCoordinates().map(c=>c.toFixed(6)).join(', ')}`;
+  row.insertCell(1).innerText = `${blue.properties.get('type')} — ${blue.geometry.getCoordinates().map(c=>c.toFixed(6)).join(', ')}`;
+  row.insertCell(2).innerText = dist;
+  row.insertCell(3).innerText = angle;
+  row.insertCell(4).innerText = compass;
+}
+
+/* Haversine distance in meters */
+function haversineDistance(a, b){
+  const R = 6371e3;
+  const φ1 = toRad(a[0]), φ2 = toRad(b[0]);
+  const Δφ = toRad(b[0]-a[0]), Δλ = toRad(b[1]-a[1]);
+  const sa = Math.sin(Δφ/2)*Math.sin(Δφ/2) + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)*Math.sin(Δλ/2);
+  const c = 2 * Math.atan2(Math.sqrt(sa), Math.sqrt(1-sa));
+  return R * c;
+}
+
+function toRad(d){ return d * Math.PI / 180; }
+
+/* compute raw angle (deg) — similar to previous code */
+function computeAngle(a,b){
+  const y = b[0] - a[0];
+  const x = b[1] - a[1];
+  return Math.atan2(y,x) * 180/Math.PI;
+}
+function computeCompass(a,b){
+  const y = b[0] - a[0];
+  const x = b[1] - a[1];
+  const ang = Math.atan2(y,x) * 180/Math.PI;
+  return (ang + 360) % 360;
+}
+
+/* toggle map expand/collapse */
+function toggleMap(){
+  const el = document.getElementById('map');
+  el.classList.toggle('expanded');
+  const btn = document.getElementById('toggleBtn');
+  btn.innerText = el.classList.contains('expanded') ? 'Փակում քարտեզը' : 'Մեծացնել քարտեզը';
+}
+</script>
+</body>
+</html>
